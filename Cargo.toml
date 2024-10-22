@@ -1,0 +1,13 @@
+[package]
+name = "tiny_evm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hex = "0.4.3"
+alloy-primitives = "0.8.9"
+sha3 = "0.10.8"
+num_enum = "0.7.3"
+thiserror = "1.0.64"
+tracing-subscriber = "0.3.18"
+tracing = "0.1.40"
