@@ -11,11 +11,13 @@ use sha3::{Digest, Keccak256};
 use num_enum::{FromPrimitive, IntoPrimitive};
 use thiserror::Error;
 use tracing::{info, debug, instrument};
+use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<(), Box<dyn Error>> {
 
     tracing_subscriber::fmt()
         // .with_max_level(tracing::Level::DEBUG)
+        .with_env_filter(EnvFilter::from_default_env()) // RUST_LOG env variable
         .init();
 
 
@@ -27,13 +29,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         info!("keccak256({}): {:0x?}", to_hash, result.as_slice());
         result.to_vec()
     };
-    let mut call_data = [0u8; 32];
+    let mut call_data = [0u8; 36];
     call_data[0] = call_data_hash[0];
     call_data[1] = call_data_hash[1];
     call_data[2] = call_data_hash[2];
     call_data[3] = call_data_hash[3];
 
-    exec(Path::new("Store1.bin"), call_data.as_slice(), None)?;
+    exec(Path::new("resources/output/Store1.bin"), call_data.as_slice(), None)?;
 
     Ok(())
 }
@@ -266,7 +268,7 @@ enum TinyEvmError {
     HexError(#[from] hex::FromHexError),
 }
 
-#[instrument(level="debug")]
+#[instrument(skip_all, level="debug")]
 fn exec(sc_path: &Path, call_data: &[u8], msg_value: Option<U256>) -> Result<(Db, Context), TinyEvmError> {
 
     let store_num_ = std::fs::read_to_string(sc_path)?;
@@ -309,7 +311,7 @@ fn exec(sc_path: &Path, call_data: &[u8], msg_value: Option<U256>) -> Result<(Db
 }
 
 /// Execute EVM bytecode
-#[instrument(ret, level="debug")]
+#[instrument(ret, skip_all, level="debug")]
 fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<ExecEndReason, TinyEvmError> {
 
     #[allow(non_snake_case)]
@@ -579,8 +581,10 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
 #[cfg(test)]
 mod test {
     use super::*;
+    use tracing_test::traced_test;
 
     #[test]
+    #[traced_test]
     fn test_store_1() -> Result<(), TinyEvmError> {
 
         let call_data_hash: Vec<u8> = {
@@ -591,13 +595,44 @@ mod test {
             result.to_vec()
         };
 
-        let mut call_data = [0u8; 32];
+        let mut call_data = [0u8; 36];
         call_data[0] = call_data_hash[0];
         call_data[1] = call_data_hash[1];
         call_data[2] = call_data_hash[2];
         call_data[3] = call_data_hash[3];
+        debug!("call_data (len: {}): {:0x?}", call_data.len(), call_data);
 
-        let (db, _) = exec(Path::new("Store1.bin"), call_data.as_slice(), None)?;
+        let (db, _) = exec(Path::new("resources/output/Store1.bin"), call_data.as_slice(), None)?;
+
+        let storage = db.storage;
+        let value_0 = storage.get(&U256::ZERO).unwrap();
+        assert_eq!(*value_0, U256::from(42));
+
+        Ok(())
+    }
+
+    #[test]
+    #[traced_test]
+    fn test_store_2() -> Result<(), TinyEvmError> {
+
+        let call_data_hash: Vec<u8> = {
+            let to_hash = "do_store(uint256)";
+            let mut hasher = Keccak256::new();
+            hasher.update(to_hash);
+            let result = hasher.finalize();
+            result.to_vec()
+        };
+
+        let call_data_arg = U256::from(12).to_be_bytes_vec();
+        let call_data: Vec<u8> = call_data_hash
+            .into_iter()
+            .take(4)
+            .chain(call_data_arg)
+            .collect();
+
+        debug!("call_data (len: {}): {:0x?}", call_data.len(), call_data);
+
+        let (db, _) = exec(Path::new("resources/output/Store2.bin"), call_data.as_slice(), None)?;
 
         let storage = db.storage;
         let value_0 = storage.get(&U256::ZERO).unwrap();

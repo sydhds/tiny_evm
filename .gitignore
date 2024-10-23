@@ -21,5 +21,5 @@ target/
 .idea/
 
 # Solidity
-*.bin
-*.abi
+resources/output/*.bin
+resources/output/*.abi
