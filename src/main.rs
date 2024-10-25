@@ -242,6 +242,16 @@ impl LowerHex for Opcode {
 struct Context {
     call_data: Vec<u8>,
     msg_value: U256,
+    /// Ethereum chain id
+    /// chain_id = {  1 // mainnet
+    //        {  2 // Morden testnet (disused)
+    //        {  2 // Expanse mainnet
+    //        {  3 // Ropsten testnet
+    //        {  4 // Rinkeby testnet
+    //        {  5 // Goerli testnet
+    //        { 42 // Kovan testnet
+    //        { ...
+    chain_id: U256,
 }
 
 #[derive(Debug)]
@@ -284,6 +294,7 @@ fn exec(sc_path: &Path, call_data: &[u8], msg_value: Option<U256>) -> Result<(Db
     let mut ctx = Context {
         call_data: call_data.to_vec(),
         msg_value: U256::from(0),
+        chain_id: U256::from(5),
     };
 
     let res_init = exec_bytecode(bytecode.as_slice(), &mut db, &mut ctx)?;
@@ -428,6 +439,10 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
                 // Note: no need to do the actual copy as we are going to execute from bytecode
                 db.contract_offset = Some(offset.try_into().unwrap());
                 debug!("OPCODE: CODECOPY - dest_offset: {} - offset: {} - len: {}", dest_offset, offset, length);
+            },
+            Opcode::CHAINID => {
+                db.stack.push(ctx.chain_id);
+                debug!("OPCODE: CHAINID");
             },
             Opcode::POP => {
                 db.stack.pop().unwrap();
@@ -641,4 +656,31 @@ mod test {
         Ok(())
     }
 
+    #[test]
+    #[traced_test]
+    fn test_store_3() -> Result<(), TinyEvmError> {
+
+        let call_data_hash: Vec<u8> = {
+            let to_hash = "do_store()";
+            let mut hasher = Keccak256::new();
+            hasher.update(to_hash);
+            let result = hasher.finalize();
+            result.to_vec()
+        };
+
+        let mut call_data = [0u8; 36];
+        call_data[0] = call_data_hash[0];
+        call_data[1] = call_data_hash[1];
+        call_data[2] = call_data_hash[2];
+        call_data[3] = call_data_hash[3];
+        debug!("call_data (len: {}): {:0x?}", call_data.len(), call_data);
+
+        let (db, ctx) = exec(Path::new("resources/output/Store3.bin"), call_data.as_slice(), None)?;
+
+        let storage = db.storage;
+        let value_0 = storage.get(&U256::ZERO).unwrap();
+        assert_eq!(*value_0, U256::from(36)+ctx.chain_id);
+
+        Ok(())
+    }
 }

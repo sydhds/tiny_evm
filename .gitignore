@@ -23,3 +23,6 @@ target/
 # Solidity
 resources/output/*.bin
 resources/output/*.abi
+
+# Misc
+TODO.md
