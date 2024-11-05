@@ -2,13 +2,13 @@
 
 A toy VM for Ethereum smart contracts, written in Rust from scratch with minimal dependencies.
 
-## Dependencies
+### Dependencies
 
 * alloy-primitives: I256 & U256 types
 * sha3: keccak256 implementation
 * hex: decode hex strings
 
-## Status
+### Status
 
 * Implemented:
   * Opcodes: 110 / 148 (~ 75%)
@@ -48,14 +48,14 @@ For podman user, run this before `docker run ...`:
 
 * export DOCKER_HOST=unix://${XDG_RUNTIME_DIR}/podman/podman.sock
 
-# Resources
+## Resources
 
 * https://noxx.substack.com/p/evm-deep-dives-the-path-to-shadowy
 * opcodes:
   * https://www.ethervm.io/
 * https://www.youtube.com/watch?v=RxL_1AfV7N4&t=2s
 
-# TODO
+## Todo
 
 * Add example with contract call
 * Add faster stack impl
