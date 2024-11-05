@@ -480,13 +480,15 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
                 let length = usize::try_from(length).unwrap();
                 
                 let mem_slice = &db.memory.as_slice()[offset..offset+length];
+                debug!("Hashing mem slice: {:0x?}", mem_slice);
                 let mut hasher = Keccak256::new();
                 hasher.update(mem_slice);
                 let result = hasher.finalize();
                 let to_push = U256::from_be_slice(result.as_slice());
+                debug!("Hashing result: {}", to_push);
                 db.stack.push(to_push);
-                debug!("stack: {:0x?}", db.stack);
-                debug!("OPCODE CALLER");
+                // debug!("stack: {:0x?}", db.stack);
+                debug!("OPCODE SHA3");
             },
             Opcode::CALLER => {
                 let addr = U256::from_be_slice(ctx.caller.as_slice());
@@ -954,7 +956,26 @@ mod test {
     #[traced_test]
     fn test_sha3() -> Result<(), TinyEvmError> {
 
-        // TODO: what is the correct data to hash for a return?
+        let msg = "Hello keccak256 !!";
+        let mut hasher = Keccak256::new();
+        hasher.update(msg.as_bytes());
+        let result = hasher.finalize();
+        let msg_hash = U256::from_be_slice(result.as_slice());
+        
+        let msg_bytes_len: [u8; 32] = U256::from(msg.as_bytes().len()).to_be_bytes();
+        let mut msg = msg.as_bytes().to_vec();
+        let len_with_padding = {
+            let mut factor = msg.len() / 32;
+            if msg.len() % 32 > 0 {
+                factor += 1;
+            }
+            factor * 32
+        };
+        
+        msg.resize(len_with_padding, 0);
+        
+        let msg_start: [u8; 32] = U256::from(32).to_be_bytes();
+        
         let call_data_hash: Vec<u8> = {
             let to_hash = "hash(string)";
             let mut hasher = Keccak256::new();
@@ -963,18 +984,26 @@ mod test {
             result.to_vec()
         };
 
-        let mut call_data = [0u8; 36];
-        call_data[0] = call_data_hash[0];
-        call_data[1] = call_data_hash[1];
-        call_data[2] = call_data_hash[2];
-        call_data[3] = call_data_hash[3];
+        // From https://docs.soliditylang.org/en/v0.8.11/abi-spec.html
+        // Call data structure:
+        // 1- method id (4 bytes)
+        // 2- offset where the first argument data starts
+        // 3- len of string (length is a byte length and not a character length)
+        // 4- string bytes (padded to 32  bytes)
+        let call_data = call_data_hash
+            .into_iter()
+            .take(4)
+            .chain(msg_start.into_iter())
+            .chain(msg_bytes_len.into_iter())
+            .chain(msg.into_iter())
+            .collect::<Vec<u8>>();
+        
         debug!("call_data (len: {}): {:0x?}", call_data.len(), call_data);
 
         // sha3.sol
         let (db, ctx) = exec(Path::new("resources/output/HashContract.bin"), call_data.as_slice(), None)?;
         
-        debug!("stack: {:?}", db.stack);
-        debug!("logs: {:?}", db.logs);
+        assert_eq!(*db.storage.get(&U256::ZERO).unwrap(), msg_hash);
         
         Ok(())
     }

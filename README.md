@@ -14,7 +14,7 @@ The following smart contract (written in Solidity) can run successfully:
 * store_1.sol: initialize a storage value && do_store to increment it with constant value (6)
 * store_2.sol: initialize a storage value && do_store to increment it with function argument (provided in call data)
 * event.sol: log events (with 3 event types)
-
+* sha3.sol: keccak256 opcode + call data arguments encode
 
 ## Compile examples
 
