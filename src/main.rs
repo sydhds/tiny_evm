@@ -411,6 +411,16 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
                 db.stack.push(to_push);
                 debug!("OPCODE: SLT");
             },
+            Opcode::SGT => {
+                // FIXME: int256 comparison - but we have U256 in stack
+                let a = db.stack.pop().unwrap();
+                let b = db.stack.pop().unwrap();
+                let a = I256::try_from(a).unwrap();
+                let b = I256::try_from(b).unwrap();
+                let to_push = if a > b { U256_ONE } else { U256::ZERO };
+                db.stack.push(to_push);
+                debug!("OPCODE: SGT");
+            },
             Opcode::EQ => {
                 let from_stack_0 = db.stack.pop().unwrap();
                 let from_stack_1 = db.stack.pop().unwrap();
@@ -463,6 +473,23 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
                 debug!("stack: {:0x?}", db.stack);
                 debug!("OPCODE: SHR: {:0x?}", res.to_be_bytes::<32>()); // bit shift right
             },
+            Opcode::SHA3 => {
+                let offset = db.stack.pop().unwrap();
+                let offset = usize::try_from(offset).unwrap();
+                let length = db.stack.pop().unwrap();
+                let length = usize::try_from(length).unwrap();
+                
+                let mem_slice = &db.memory.as_slice()[offset..offset+length];
+                debug!("Hashing mem slice: {:0x?}", mem_slice);
+                let mut hasher = Keccak256::new();
+                hasher.update(mem_slice);
+                let result = hasher.finalize();
+                let to_push = U256::from_be_slice(result.as_slice());
+                debug!("Hashing result: {}", to_push);
+                db.stack.push(to_push);
+                // debug!("stack: {:0x?}", db.stack);
+                debug!("OPCODE SHA3");
+            },
             Opcode::CALLER => {
                 let addr = U256::from_be_slice(ctx.caller.as_slice());
                 println!("addr: {}", addr);
@@ -489,6 +516,17 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
                 db.stack.push(to_push);
                 debug!("stack: {:0x?}", db.stack);
                 debug!("OPCODE: CALLDATASIZE");
+            },
+            Opcode::CALLDATACOPY => {
+                let dest_offset = db.stack.pop().unwrap();
+                let dest_offset = usize::try_from(dest_offset).unwrap();
+                let offset = db.stack.pop().unwrap();
+                let offset = usize::try_from(offset).unwrap();
+                let length = db.stack.pop().unwrap();
+                let length = usize::try_from(length).unwrap();
+                let memory_slice = &mut db.memory.as_mut_slice()[dest_offset..dest_offset+length];
+                memory_slice.copy_from_slice(&ctx.call_data[offset..offset+length]);
+                debug!("OPCODE: CALLDATACOPY");
             },
             Opcode::CODECOPY => {
                 let dest_offset = db.stack.pop().unwrap();
@@ -599,6 +637,20 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
                 let value = db.stack.pop().unwrap();
                 db.transient_storage.insert(key, value);
                 debug!("OPCODE: TSTORE");
+            },
+            Opcode::MCOPY => {
+                let dest_offset = db.stack.pop().unwrap();
+                let dest_offset = usize::try_from(dest_offset).unwrap();
+                let offset = db.stack.pop().unwrap();
+                let offset = usize::try_from(offset).unwrap();
+                let length = db.stack.pop().unwrap();
+                let length = usize::try_from(length).unwrap();
+                
+                let to_copy = db.memory[offset..offset+length].to_vec();
+                
+                let memory_slice = &mut db.memory.as_mut_slice()[dest_offset..dest_offset+length];
+                memory_slice.copy_from_slice(to_copy.as_slice());
+                debug!("OPCODE: MCOPY");
             },
             Opcode::PUSH0 => {
                 db.stack.push(U256::ZERO);
@@ -714,7 +766,6 @@ mod test {
     #[test]
     #[traced_test]
     fn test_store_1() -> Result<(), TinyEvmError> {
-
         let call_data_hash: Vec<u8> = {
             let to_hash = "do_store()";
             let mut hasher = Keccak256::new();
@@ -742,7 +793,6 @@ mod test {
     #[test]
     #[traced_test]
     fn test_store_2() -> Result<(), TinyEvmError> {
-
         let call_data_hash: Vec<u8> = {
             let to_hash = "do_store(uint256)";
             let mut hasher = Keccak256::new();
@@ -772,7 +822,6 @@ mod test {
     #[test]
     #[traced_test]
     fn test_store_3() -> Result<(), TinyEvmError> {
-
         let call_data_hash: Vec<u8> = {
             let to_hash = "do_store()";
             let mut hasher = Keccak256::new();
@@ -792,7 +841,7 @@ mod test {
 
         let storage = db.storage;
         let value_0 = storage.get(&U256::ZERO).unwrap();
-        assert_eq!(*value_0, U256::from(36)+ctx.chain_id);
+        assert_eq!(*value_0, U256::from(36) + ctx.chain_id);
 
         Ok(())
     }
@@ -898,8 +947,64 @@ mod test {
         let msg_expected = b"Hello World from MyLog2 !";
         // length(msg_expected)
         assert_eq!(U256::from_be_slice(log_4_v2), U256::from(msg_expected.len()));
-        assert_eq!(&log_4_slice[96..96+25], msg_expected);
+        assert_eq!(&log_4_slice[96..96 + 25], msg_expected);
 
+        Ok(())
+    }
+
+    #[test]
+    #[traced_test]
+    fn test_sha3() -> Result<(), TinyEvmError> {
+
+        let msg = "Hello keccak256 !!";
+        let mut hasher = Keccak256::new();
+        hasher.update(msg.as_bytes());
+        let result = hasher.finalize();
+        let msg_hash = U256::from_be_slice(result.as_slice());
+        
+        let msg_bytes_len: [u8; 32] = U256::from(msg.as_bytes().len()).to_be_bytes();
+        let mut msg = msg.as_bytes().to_vec();
+        let len_with_padding = {
+            let mut factor = msg.len() / 32;
+            if msg.len() % 32 > 0 {
+                factor += 1;
+            }
+            factor * 32
+        };
+        
+        msg.resize(len_with_padding, 0);
+        
+        let msg_start: [u8; 32] = U256::from(32).to_be_bytes();
+        
+        let call_data_hash: Vec<u8> = {
+            let to_hash = "hash(string)";
+            let mut hasher = Keccak256::new();
+            hasher.update(to_hash);
+            let result = hasher.finalize();
+            result.to_vec()
+        };
+
+        // From https://docs.soliditylang.org/en/v0.8.11/abi-spec.html
+        // Call data structure:
+        // 1- method id (4 bytes)
+        // 2- offset where the first argument data starts
+        // 3- len of string (length is a byte length and not a character length)
+        // 4- string bytes (padded to 32  bytes)
+        let call_data = call_data_hash
+            .into_iter()
+            .take(4)
+            .chain(msg_start.into_iter())
+            .chain(msg_bytes_len.into_iter())
+            .chain(msg.into_iter())
+            .collect::<Vec<u8>>();
+        
+        debug!("call_data (len: {}): {:0x?}", call_data.len(), call_data);
+
+        // sha3.sol
+        let (db, ctx) = exec(Path::new("resources/output/HashContract.bin"), call_data.as_slice(), None)?;
+        
+        assert_eq!(*db.storage.get(&U256::ZERO).unwrap(), msg_hash);
+        
         Ok(())
     }
 }
