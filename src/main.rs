@@ -1,43 +1,76 @@
-extern crate core;
+// extern crate core;
 
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Formatter, LowerHex};
 use std::ops::{Shl, Shr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use alloy_primitives::{address, U256};
-use alloy_primitives::I256;
-use alloy_primitives::Address;
-use sha3::{Digest, Keccak256};
+use alloy_primitives::{address, Address, I256, U256};
+use clap::Parser;
 use num_enum::{FromPrimitive, IntoPrimitive};
+use sha3::{Digest, Keccak256};
 use thiserror::Error;
-use tracing::{info, debug, instrument};
-use tracing_subscriber::EnvFilter;
+use tracing::level_filters::LevelFilter;
+use tracing::{debug, info, instrument};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+#[derive(Debug, Clone, Parser)]
+#[command(name = "tiny-evm")]
+#[command(version, about = "A toy Ethereum VM", long_about = None)]
+pub struct Cli {
+    #[arg(
+        long = "sc",
+        help = "Smart contract path",
+        default_value = "resources/output/Store1.bin"
+    )]
+    sc_path: PathBuf,
+    #[arg(
+        short = 'c',
+        long = "call_data",
+        help = "Call data (method id + arguments) - computed automatically for Store1.bin"
+    )]
+    call_data: Option<String>,
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
-
-    tracing_subscriber::fmt()
-        // .with_max_level(tracing::Level::DEBUG)
-        // .with_env_filter(EnvFilter::from_default_env()) // RUST_LOG env variable
+    let filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy();
+    tracing_subscriber::registry()
+        .with(fmt::layer())
+        .with(filter)
         .init();
 
+    let cli = Cli::parse();
+    debug!("cli: {:?}", cli);
 
-    let call_data_hash: Vec<u8> = {
-        let to_hash = "do_store()";
-        let mut hasher = Keccak256::new();
-        hasher.update(to_hash);
-        let result = hasher.finalize();
-        info!("keccak256({}): {:0x?}", to_hash, result.as_slice());
-        result.to_vec()
+    let call_data = if let Some(call_data) = cli.call_data {
+        hex::decode(call_data)?
+    } else {
+        // Quickstart - easy to run :)
+        let call_data_hash: Vec<u8> = {
+            let to_hash = "do_store()";
+            let mut hasher = Keccak256::new();
+            hasher.update(to_hash);
+            let result = hasher.finalize();
+            info!("keccak256({}): {:0x?}", to_hash, result.as_slice());
+            result.to_vec()
+        };
+        let mut call_data = [0u8; 36];
+        call_data[0] = call_data_hash[0];
+        call_data[1] = call_data_hash[1];
+        call_data[2] = call_data_hash[2];
+        call_data[3] = call_data_hash[3];
+        call_data.to_vec()
     };
-    let mut call_data = [0u8; 36];
-    call_data[0] = call_data_hash[0];
-    call_data[1] = call_data_hash[1];
-    call_data[2] = call_data_hash[2];
-    call_data[3] = call_data_hash[3];
 
-    exec(Path::new("resources/output/Store1.bin"), call_data.as_slice(), None)?;
+    let (db, _ctx) = exec(cli.sc_path.as_path(), call_data.as_slice(), None)?;
+
+    info!("Result:");
+    info!("storage: {:?}", db.storage);
+    info!("transient storage: {:?}", db.transient_storage);
+    info!("logs: {:?}", db.logs);
 
     Ok(())
 }
@@ -46,7 +79,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[derive(Debug, Clone, FromPrimitive, IntoPrimitive, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 enum Opcode {
-
     // End of execution opcode
     STOP = 0x00,
 
@@ -257,6 +289,7 @@ struct Context {
     chain_id: U256,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct LogEvent {
     data: Vec<u8>,
@@ -288,9 +321,12 @@ enum TinyEvmError {
     HexError(#[from] hex::FromHexError),
 }
 
-#[instrument(skip_all, level="debug")]
-fn exec(sc_path: &Path, call_data: &[u8], msg_value: Option<U256>) -> Result<(Db, Context), TinyEvmError> {
-
+#[instrument(skip_all, level = "debug")]
+fn exec(
+    sc_path: &Path,
+    call_data: &[u8],
+    msg_value: Option<U256>,
+) -> Result<(Db, Context), TinyEvmError> {
     let store_num_ = std::fs::read_to_string(sc_path)?;
     let bytecode = hex::decode(store_num_)?;
 
@@ -316,8 +352,6 @@ fn exec(sc_path: &Path, call_data: &[u8], msg_value: Option<U256>) -> Result<(Db
     if let ExecEndReason::Return(_pc) = res_init {
         debug!("contract_offset: {:0x?}", db.contract_offset);
         debug!("{}", "#".repeat(32));
-        let sc_offset = db.contract_offset.clone();
-        debug!("sc_offset: {:?}", sc_offset);
         // SC contract part
         // ctx.msg_value = U256::from(1000000000000000u64); // == 1M Gwei == 0.001 Ethereum
         // ctx.msg_value = U256::from(0u64);
@@ -327,19 +361,28 @@ fn exec(sc_path: &Path, call_data: &[u8], msg_value: Option<U256>) -> Result<(Db
         if let ExecEndReason::Stop = res_sc {
             info!("Successfully executed the bytecode for: {:?} !", sc_path);
         } else {
-            panic!("Error while executing sc part of the bytecode, expecting Stop but got {:?}", res_sc);
+            panic!(
+                "Error while executing sc part of the bytecode, expecting Stop but got {:?}",
+                res_sc
+            );
         }
     } else {
-        panic!("Error while executing init part of bytecode, expecting Return but got {:?}", res_init);
+        panic!(
+            "Error while executing init part of bytecode, expecting Return but got {:?}",
+            res_init
+        );
     }
 
     Ok((db, ctx))
 }
 
 /// Execute EVM bytecode
-#[instrument(ret, skip_all, level="debug")]
-fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<ExecEndReason, TinyEvmError> {
-
+#[instrument(ret, skip_all, level = "debug")]
+fn exec_bytecode(
+    bytecode: &[u8],
+    db: &mut Db,
+    ctx: &mut Context,
+) -> Result<ExecEndReason, TinyEvmError> {
     #[allow(non_snake_case)]
     let U256_ONE: U256 = U256::from(1);
     let mut pc = db.contract_offset.unwrap_or(0);
@@ -355,62 +398,86 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
             Opcode::STOP => {
                 debug!("OPCODE: STOP");
                 break;
-            },
+            }
             Opcode::ADD => {
                 let a = db.stack.pop().unwrap();
                 let b = db.stack.pop().unwrap();
                 // (u)int256 addition modulo 2**256
                 db.stack.push(a.wrapping_add(b));
                 debug!("OPCODE: SUB");
-            },
+            }
             Opcode::MUL => {
                 let a = db.stack.pop().unwrap();
                 let b = db.stack.pop().unwrap();
                 db.stack.push(a.wrapping_mul(b));
                 debug!("OPCODE: MUL");
-            },
+            }
             Opcode::SUB => {
                 let a = db.stack.pop().unwrap();
                 let b = db.stack.pop().unwrap();
                 db.stack.push(a.wrapping_sub(b));
                 debug!("OPCODE: SUB");
             },
+            Opcode::DIV => {
+                let a = db.stack.pop().unwrap();
+                let b = db.stack.pop().unwrap();
+                db.stack.push(a.wrapping_div(b));
+                debug!("OPCODE: DIV");
+            },
+            Opcode::SDIV => {
+                let a = db.stack.pop().unwrap();
+                let b = db.stack.pop().unwrap();
+                let a = I256::try_from(a).unwrap();
+                let b = I256::try_from(b).unwrap();
+                let sdiv = a.wrapping_div(b);
+                db.stack.push(U256::try_from(sdiv).unwrap());
+                debug!("OPCODE: SDIV");
+            },
+            Opcode::MOD => {
+                let a = db.stack.pop().unwrap();
+                let b = db.stack.pop().unwrap();
+                db.stack.push(a % b);
+                debug!("OPCODE: MOD");
+            },
+            Opcode::SMOD => {
+                let a = db.stack.pop().unwrap();
+                let b = db.stack.pop().unwrap();
+                let a = I256::try_from(a).unwrap();
+                let b = I256::try_from(b).unwrap();
+                let smod = a % b;
+                db.stack.push(U256::try_from(smod).unwrap());
+                debug!("OPCODE: SMOD");
+            },
+            Opcode::EXP => {
+                let a = db.stack.pop().unwrap();
+                let b = db.stack.pop().unwrap();
+                db.stack.push(a.wrapping_pow(b));
+                debug!("OPCODE: EXP");
+            },
             Opcode::LT => {
                 let a = db.stack.pop().unwrap();
                 let b = db.stack.pop().unwrap();
-                let to_push = if a < b {
-                    U256_ONE
-                } else {
-                    U256::ZERO
-                };
+                let to_push = if a < b { U256_ONE } else { U256::ZERO };
                 db.stack.push(to_push);
                 debug!("OPCODE: LT");
-            },
+            }
             Opcode::GT => {
                 let a = db.stack.pop().unwrap();
                 let b = db.stack.pop().unwrap();
-                let to_push = if a > b {
-                    U256_ONE
-                } else {
-                    U256::ZERO
-                };
+                let to_push = if a > b { U256_ONE } else { U256::ZERO };
                 db.stack.push(to_push);
                 debug!("OPCODE: GT");
-            },
+            }
             Opcode::SLT => {
                 // FIXME: int256 comparison - but we have U256 in stack
                 let a = db.stack.pop().unwrap();
                 let b = db.stack.pop().unwrap();
                 let a = I256::try_from(a).unwrap();
                 let b = I256::try_from(b).unwrap();
-                let to_push = if a < b {
-                    U256_ONE
-                } else {
-                    U256::ZERO
-                };
+                let to_push = if a < b { U256_ONE } else { U256::ZERO };
                 db.stack.push(to_push);
                 debug!("OPCODE: SLT");
-            },
+            }
             Opcode::SGT => {
                 // FIXME: int256 comparison - but we have U256 in stack
                 let a = db.stack.pop().unwrap();
@@ -420,41 +487,49 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
                 let to_push = if a > b { U256_ONE } else { U256::ZERO };
                 db.stack.push(to_push);
                 debug!("OPCODE: SGT");
-            },
+            }
             Opcode::EQ => {
                 let from_stack_0 = db.stack.pop().unwrap();
                 let from_stack_1 = db.stack.pop().unwrap();
-                let to_push = if from_stack_0 == from_stack_1 { U256_ONE } else { U256::ZERO };
+                let to_push = if from_stack_0 == from_stack_1 {
+                    U256_ONE
+                } else {
+                    U256::ZERO
+                };
                 db.stack.push(to_push);
                 debug!("stack: {:0x?}", db.stack);
                 debug!("OPCODE: EQ");
-            },
+            }
             Opcode::ISZERO => {
                 let from_stack_0 = db.stack.pop().unwrap();
-                let to_push = if from_stack_0 == U256::ZERO { U256_ONE } else { U256::ZERO };
+                let to_push = if from_stack_0 == U256::ZERO {
+                    U256_ONE
+                } else {
+                    U256::ZERO
+                };
                 db.stack.push(to_push);
                 debug!("stack: {:0x?}", db.stack);
                 debug!("OPCODE: ISZERO");
-            },
+            }
             Opcode::AND => {
                 let a = db.stack.pop().unwrap();
                 let b = db.stack.pop().unwrap();
                 db.stack.push(a & b);
-            },
+            }
             Opcode::OR => {
                 let a = db.stack.pop().unwrap();
                 let b = db.stack.pop().unwrap();
                 db.stack.push(a | b);
-            },
+            }
             Opcode::XOR => {
                 let a = db.stack.pop().unwrap();
                 let b = db.stack.pop().unwrap();
                 db.stack.push(a ^ b);
-            },
+            }
             Opcode::NOT => {
                 let a = db.stack.pop().unwrap();
                 db.stack.push(!a);
-            },
+            }
             Opcode::SHL => {
                 let shift_by = db.stack.pop().unwrap();
                 let shift_by: usize = shift_by.try_into().unwrap();
@@ -463,7 +538,7 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
                 db.stack.push(res);
                 debug!("stack: {:0x?}", db.stack);
                 debug!("OPCODE: SHL: {:0x?}", res.to_be_bytes::<32>()); // bit shift left
-            },
+            }
             Opcode::SHR => {
                 let shift_by = db.stack.pop().unwrap();
                 let shift_by: usize = shift_by.try_into().unwrap();
@@ -472,14 +547,14 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
                 db.stack.push(res);
                 debug!("stack: {:0x?}", db.stack);
                 debug!("OPCODE: SHR: {:0x?}", res.to_be_bytes::<32>()); // bit shift right
-            },
+            }
             Opcode::SHA3 => {
                 let offset = db.stack.pop().unwrap();
                 let offset = usize::try_from(offset).unwrap();
                 let length = db.stack.pop().unwrap();
                 let length = usize::try_from(length).unwrap();
-                
-                let mem_slice = &db.memory.as_slice()[offset..offset+length];
+
+                let mem_slice = &db.memory.as_slice()[offset..offset + length];
                 debug!("Hashing mem slice: {:0x?}", mem_slice);
                 let mut hasher = Keccak256::new();
                 hasher.update(mem_slice);
@@ -489,10 +564,9 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
                 db.stack.push(to_push);
                 // debug!("stack: {:0x?}", db.stack);
                 debug!("OPCODE SHA3");
-            },
+            }
             Opcode::CALLER => {
                 let addr = U256::from_be_slice(ctx.caller.as_slice());
-                println!("addr: {}", addr);
                 db.stack.push(addr);
                 debug!("stack: {:0x?}", db.stack);
                 debug!("OPCODE CALLER");
@@ -501,22 +575,22 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
                 db.stack.push(ctx.msg_value);
                 debug!("stack: {:0x?}", db.stack);
                 debug!("OPCODE CALLVALUE");
-            },
+            }
             Opcode::CALLDATALOAD => {
                 let offset = db.stack.pop().unwrap();
                 let offset: usize = offset.try_into().unwrap();
-                let to_push = &ctx.call_data[offset..offset+32];
+                let to_push = &ctx.call_data[offset..offset + 32];
                 let to_push = U256::from_be_bytes::<32>(to_push.try_into().unwrap());
                 db.stack.push(to_push);
                 debug!("stack: {:0x?}", db.stack);
                 debug!("OPCODE: CALLDATALOAD");
-            },
+            }
             Opcode::CALLDATASIZE => {
                 let to_push = U256::from(ctx.call_data.len());
                 db.stack.push(to_push);
                 debug!("stack: {:0x?}", db.stack);
                 debug!("OPCODE: CALLDATASIZE");
-            },
+            }
             Opcode::CALLDATACOPY => {
                 let dest_offset = db.stack.pop().unwrap();
                 let dest_offset = usize::try_from(dest_offset).unwrap();
@@ -524,43 +598,44 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
                 let offset = usize::try_from(offset).unwrap();
                 let length = db.stack.pop().unwrap();
                 let length = usize::try_from(length).unwrap();
-                let memory_slice = &mut db.memory.as_mut_slice()[dest_offset..dest_offset+length];
-                memory_slice.copy_from_slice(&ctx.call_data[offset..offset+length]);
+                let memory_slice = &mut db.memory.as_mut_slice()[dest_offset..dest_offset + length];
+                memory_slice.copy_from_slice(&ctx.call_data[offset..offset + length]);
                 debug!("OPCODE: CALLDATACOPY");
-            },
+            }
             Opcode::CODECOPY => {
                 let dest_offset = db.stack.pop().unwrap();
                 let offset = db.stack.pop().unwrap();
                 let length = db.stack.pop().unwrap();
                 // Note: no need to do the actual copy as we are going to execute from bytecode
                 db.contract_offset = Some(offset.try_into().unwrap());
-                debug!("OPCODE: CODECOPY - dest_offset: {} - offset: {} - len: {}", dest_offset, offset, length);
-            },
+                debug!(
+                    "OPCODE: CODECOPY - dest_offset: {} - offset: {} - len: {}",
+                    dest_offset, offset, length
+                );
+            }
             Opcode::CHAINID => {
                 db.stack.push(ctx.chain_id);
                 debug!("OPCODE: CHAINID");
-            },
+            }
             Opcode::POP => {
                 db.stack.pop().unwrap();
                 debug!("OPCODE: POP");
-            },
+            }
             Opcode::MLOAD => {
                 let offset = db.stack.pop().unwrap();
                 let offset: usize = offset.try_into().unwrap();
-                let value = U256::from_be_slice(
-                    &db.memory.as_slice()[offset..offset+32]
-                );
+                let value = U256::from_be_slice(&db.memory.as_slice()[offset..offset + 32]);
                 db.stack.push(value);
                 debug!("OPCODE: MLOAD, offset: {}, value: {}", offset, value);
-            },
+            }
             Opcode::MSTORE => {
                 let offset = db.stack.pop().unwrap();
                 let offset: usize = offset.try_into().unwrap();
                 let value = db.stack.pop().unwrap();
-                let memory_slice = &mut db.memory.as_mut_slice()[offset..offset+32];
+                let memory_slice = &mut db.memory.as_mut_slice()[offset..offset + 32];
                 memory_slice.copy_from_slice(&value.to_be_bytes::<32>());
                 debug!("OPCODE: MSTORE, offset: {}, value: {}", offset, value);
-            },
+            }
             Opcode::SLOAD => {
                 let key = db.stack.pop().unwrap();
                 let value = db.storage.get(&key).unwrap();
@@ -573,7 +648,7 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
                 db.storage.insert(key, value);
                 debug!("Storage: {:?}", db.storage);
                 debug!("OPCODE: SSTORE");
-            },
+            }
             Opcode::JUMP => {
                 let pc_0 = pc;
                 let destination = db.stack.pop().unwrap();
@@ -614,7 +689,10 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
                     debug!("opcode_at pc {}: {:0x?}", pc, opcode_at_dest);
                     if opcode_at_dest != 0x5B {
                         // FIXME: Err
-                        debug!("JUMPI destination is not a JUMPDEST opcode but a {:0x} opcode", opcode_at_dest);
+                        debug!(
+                            "JUMPI destination is not a JUMPDEST opcode but a {:0x} opcode",
+                            opcode_at_dest
+                        );
                         // break;
                     } else {
                         pc += 1;
@@ -622,9 +700,9 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
                 }
                 debug!("stack: {:0x?}", db.stack);
                 debug!("OPCODE: JUMPI, pc: {} (pc was: {})", pc, pc_0);
-            }, /*
+            } /*
             0x5B => {
-                println!("OPCODE: JUMPDEST");
+            println!("OPCODE: JUMPDEST");
             }, */
             Opcode::TLOAD => {
                 let key = db.stack.pop().unwrap();
@@ -637,7 +715,7 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
                 let value = db.stack.pop().unwrap();
                 db.transient_storage.insert(key, value);
                 debug!("OPCODE: TSTORE");
-            },
+            }
             Opcode::MCOPY => {
                 let dest_offset = db.stack.pop().unwrap();
                 let dest_offset = usize::try_from(dest_offset).unwrap();
@@ -645,29 +723,34 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
                 let offset = usize::try_from(offset).unwrap();
                 let length = db.stack.pop().unwrap();
                 let length = usize::try_from(length).unwrap();
-                
-                let to_copy = db.memory[offset..offset+length].to_vec();
-                
-                let memory_slice = &mut db.memory.as_mut_slice()[dest_offset..dest_offset+length];
+
+                let to_copy = db.memory[offset..offset + length].to_vec();
+
+                let memory_slice = &mut db.memory.as_mut_slice()[dest_offset..dest_offset + length];
                 memory_slice.copy_from_slice(to_copy.as_slice());
                 debug!("OPCODE: MCOPY");
-            },
+            }
             Opcode::PUSH0 => {
                 db.stack.push(U256::ZERO);
                 debug!("stack: {:0x?}", db.stack);
                 debug!("OPCODE: PUSH_0");
-            },
+            }
             opcode_ if (Opcode::PUSH1..=Opcode::PUSH32).contains(&opcode_) => {
                 // PUSH_1 ... PUSH_32
                 let push_idx = u8::from(opcode) - u8::from(Opcode::PUSH1) + 1;
                 let push_idx_ = usize::from(push_idx);
-                let values = &bytecode[pc..(pc+push_idx_)];
+                let values = &bytecode[pc..(pc + push_idx_)];
                 pc += push_idx_;
                 let to_push = U256::from_be_slice(values);
                 db.stack.push(to_push);
                 debug!("stack: {:0x?}", db.stack);
-                debug!("OPCODE: PUSH{}, hex value: {:0x?} - value: {}", push_idx.to_ascii_uppercase(), values, to_push);
-            },
+                debug!(
+                    "OPCODE: PUSH{}, hex value: {:0x?} - value: {}",
+                    push_idx.to_ascii_uppercase(),
+                    values,
+                    to_push
+                );
+            }
             opcode_ if (Opcode::DUP1..=Opcode::DUP16).contains(&opcode_) => {
                 let push_idx = u8::from(opcode) - u8::from(Opcode::DUP1) + 1;
                 let push_idx_ = usize::from(push_idx);
@@ -675,19 +758,17 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
                 db.stack.push(stack_at);
                 debug!("stack: {:0x?}", db.stack);
                 debug!("OPCODE: DUP{}", push_idx.to_ascii_uppercase());
-            },
+            }
             opcode_ if (Opcode::SWAP1..=Opcode::SWAP16).contains(&opcode_) => {
                 debug!("OPCODE: SWAPX - stack: {:0x?}", db.stack);
                 let push_idx = u8::from(opcode) - u8::from(Opcode::SWAP1) + 1;
                 let push_idx_ = usize::from(push_idx);
                 let index_last = db.stack.len() - 1;
                 let index_to_swap = db.stack.len() - push_idx_ - 1;
-                let tmp = db.stack[index_last];
-                db.stack[index_last] = db.stack[index_to_swap];
-                db.stack[index_to_swap] = tmp;
+                db.stack.swap(index_last, index_to_swap);
                 debug!("stack: {:0x?}", db.stack);
                 debug!("OPCODE: SWAP{}", push_idx.to_ascii_uppercase());
-            },
+            }
             opcode_ if (Opcode::LOG0..=Opcode::LOG4).contains(&opcode_) => {
                 debug!("OPCODE: LOGX - stack: {:0x?}", db.stack);
                 let offset = db.stack.pop().unwrap();
@@ -696,17 +777,21 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
                 let length: usize = length.try_into().unwrap();
                 let log_idx = u8::from(opcode) - u8::from(Opcode::LOG0);
                 let mut topics = vec![];
-                for i in 0..log_idx {
+                for _i in 0..log_idx {
                     let topic = db.stack.pop().unwrap();
                     topics.push(topic);
                 }
                 db.logs.push(LogEvent {
-                    data: db.memory.as_slice()[offset..offset+length].to_vec(),
+                    data: db.memory.as_slice()[offset..offset + length].to_vec(),
                     topics: topics.clone(),
                 });
                 debug!("stack: {:0x?}", db.stack);
-                debug!("OPCODE LOG{} - topics len: {:?}", log_idx.to_ascii_uppercase(), topics.len());
-            },
+                debug!(
+                    "OPCODE LOG{} - topics len: {:?}",
+                    log_idx.to_ascii_uppercase(),
+                    topics.len()
+                );
+            }
             Opcode::RETURN => {
                 let offset = db.stack.pop().unwrap();
                 let length = db.stack.pop().unwrap();
@@ -714,12 +799,12 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
                 debug!("[END RETURN] pc: 0x{:0x} - pc: {}", pc, pc);
                 res = Ok(ExecEndReason::Return(pc));
                 break;
-            },
+            }
             Opcode::REVERT => {
                 debug!("OPCODE: REVERT");
                 res = Ok(ExecEndReason::Revert);
                 break;
-            },
+            }
             _ => unimplemented!("opcode {:x} not implemented", opcode),
         }
 
@@ -731,7 +816,6 @@ fn exec_bytecode(bytecode: &[u8], db: &mut Db, ctx: &mut Context) -> Result<Exec
 
     res
 }
-
 
 #[cfg(test)]
 mod test {
@@ -762,7 +846,6 @@ mod test {
         }
     }
 
-
     #[test]
     #[traced_test]
     fn test_store_1() -> Result<(), TinyEvmError> {
@@ -781,7 +864,11 @@ mod test {
         call_data[3] = call_data_hash[3];
         debug!("call_data (len: {}): {:0x?}", call_data.len(), call_data);
 
-        let (db, _) = exec(Path::new("resources/output/Store1.bin"), call_data.as_slice(), None)?;
+        let (db, _) = exec(
+            Path::new("resources/output/Store1.bin"),
+            call_data.as_slice(),
+            None,
+        )?;
 
         let storage = db.storage;
         let value_0 = storage.get(&U256::ZERO).unwrap();
@@ -810,7 +897,11 @@ mod test {
 
         debug!("call_data (len: {}): {:0x?}", call_data.len(), call_data);
 
-        let (db, _) = exec(Path::new("resources/output/Store2.bin"), call_data.as_slice(), None)?;
+        let (db, _) = exec(
+            Path::new("resources/output/Store2.bin"),
+            call_data.as_slice(),
+            None,
+        )?;
 
         let storage = db.storage;
         let value_0 = storage.get(&U256::ZERO).unwrap();
@@ -837,7 +928,11 @@ mod test {
         call_data[3] = call_data_hash[3];
         debug!("call_data (len: {}): {:0x?}", call_data.len(), call_data);
 
-        let (db, ctx) = exec(Path::new("resources/output/Store3.bin"), call_data.as_slice(), None)?;
+        let (db, ctx) = exec(
+            Path::new("resources/output/Store3.bin"),
+            call_data.as_slice(),
+            None,
+        )?;
 
         let storage = db.storage;
         let value_0 = storage.get(&U256::ZERO).unwrap();
@@ -875,18 +970,20 @@ mod test {
         ];
 
         {
-            let mut call_data = [0u8; 36];
             let mut db = Db::default();
             let mut ctx = Context::default();
 
             debug!("Exec bytecode_1:");
             let res_1 = exec_bytecode(bytecode_1.as_slice(), &mut db, &mut ctx);
             assert!(res_1.is_ok());
-            assert_eq!(db.stack, vec![
-                U256::from(value_0),
-                U256::from(value_2),
-                U256::from(value_1)
-            ]);
+            assert_eq!(
+                db.stack,
+                vec![
+                    U256::from(value_0),
+                    U256::from(value_2),
+                    U256::from(value_1)
+                ]
+            );
         }
 
         {
@@ -895,11 +992,14 @@ mod test {
             debug!("Exec bytecode_2:");
             let res_2 = exec_bytecode(bytecode_2.as_slice(), &mut db, &mut ctx);
             assert!(res_2.is_ok());
-            assert_eq!(db.stack, vec![
-                U256::from(value_2),
-                U256::from(value_1),
-                U256::from(value_0)
-            ]);
+            assert_eq!(
+                db.stack,
+                vec![
+                    U256::from(value_2),
+                    U256::from(value_1),
+                    U256::from(value_0)
+                ]
+            );
         }
 
         Ok(())
@@ -908,7 +1008,6 @@ mod test {
     #[test]
     #[traced_test]
     fn test_event() -> Result<(), TinyEvmError> {
-
         // TODO: what is the correct data to hash for a return?
         let call_data_hash: Vec<u8> = {
             let to_hash = "and_and_event(uint256)";
@@ -924,14 +1023,25 @@ mod test {
         call_data[2] = call_data_hash[2];
         call_data[3] = call_data_hash[3];
         debug!("call_data (len: {}): {:0x?}", call_data.len(), call_data);
+        debug!("call_data hex: -{}-", hex::encode(&call_data));
 
-        let (db, ctx) = exec(Path::new("resources/output/AddAndEvent.bin"), call_data.as_slice(), None)?;
+        let (db, _ctx) = exec(
+            Path::new("resources/output/AddAndEvent.bin"),
+            call_data.as_slice(),
+            None,
+        )?;
 
         // debug!("db logs: {:?}", db.logs);
 
-        assert_eq!(U256::from_be_slice(db.logs[0].data.as_slice()), U256::from(1));
+        assert_eq!(
+            U256::from_be_slice(db.logs[0].data.as_slice()),
+            U256::from(1)
+        );
         assert_eq!(U256::from_be_slice(db.logs[1].data.as_slice()), U256::ZERO);
-        assert_eq!(U256::from_be_slice(db.logs[2].data.as_slice()), U256::from(128));
+        assert_eq!(
+            U256::from_be_slice(db.logs[2].data.as_slice()),
+            U256::from(128)
+        );
 
         // TODO
         // let log_3_slice = db.logs[3].data.as_slice();
@@ -946,7 +1056,10 @@ mod test {
         assert_eq!(U256::from_be_slice(log_4_v1), U256::from(128));
         let msg_expected = b"Hello World from MyLog2 !";
         // length(msg_expected)
-        assert_eq!(U256::from_be_slice(log_4_v2), U256::from(msg_expected.len()));
+        assert_eq!(
+            U256::from_be_slice(log_4_v2),
+            U256::from(msg_expected.len())
+        );
         assert_eq!(&log_4_slice[96..96 + 25], msg_expected);
 
         Ok(())
@@ -955,13 +1068,12 @@ mod test {
     #[test]
     #[traced_test]
     fn test_sha3() -> Result<(), TinyEvmError> {
-
         let msg = "Hello keccak256 !!";
         let mut hasher = Keccak256::new();
         hasher.update(msg.as_bytes());
         let result = hasher.finalize();
         let msg_hash = U256::from_be_slice(result.as_slice());
-        
+
         let msg_bytes_len: [u8; 32] = U256::from(msg.as_bytes().len()).to_be_bytes();
         let mut msg = msg.as_bytes().to_vec();
         let len_with_padding = {
@@ -971,11 +1083,11 @@ mod test {
             }
             factor * 32
         };
-        
+
         msg.resize(len_with_padding, 0);
-        
+
         let msg_start: [u8; 32] = U256::from(32).to_be_bytes();
-        
+
         let call_data_hash: Vec<u8> = {
             let to_hash = "hash(string)";
             let mut hasher = Keccak256::new();
@@ -997,14 +1109,18 @@ mod test {
             .chain(msg_bytes_len.into_iter())
             .chain(msg.into_iter())
             .collect::<Vec<u8>>();
-        
+
         debug!("call_data (len: {}): {:0x?}", call_data.len(), call_data);
 
         // sha3.sol
-        let (db, ctx) = exec(Path::new("resources/output/HashContract.bin"), call_data.as_slice(), None)?;
-        
+        let (db, _ctx) = exec(
+            Path::new("resources/output/HashContract.bin"),
+            call_data.as_slice(),
+            None,
+        )?;
+
         assert_eq!(*db.storage.get(&U256::ZERO).unwrap(), msg_hash);
-        
+
         Ok(())
     }
 }
