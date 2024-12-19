@@ -417,13 +417,13 @@ fn exec_bytecode(
                 let b = db.stack.pop().unwrap();
                 db.stack.push(a.wrapping_sub(b));
                 debug!("OPCODE: SUB");
-            },
+            }
             Opcode::DIV => {
                 let a = db.stack.pop().unwrap();
                 let b = db.stack.pop().unwrap();
                 db.stack.push(a.wrapping_div(b));
                 debug!("OPCODE: DIV");
-            },
+            }
             Opcode::SDIV => {
                 let a = db.stack.pop().unwrap();
                 let b = db.stack.pop().unwrap();
@@ -432,13 +432,13 @@ fn exec_bytecode(
                 let sdiv = a.wrapping_div(b);
                 db.stack.push(U256::try_from(sdiv).unwrap());
                 debug!("OPCODE: SDIV");
-            },
+            }
             Opcode::MOD => {
                 let a = db.stack.pop().unwrap();
                 let b = db.stack.pop().unwrap();
                 db.stack.push(a % b);
                 debug!("OPCODE: MOD");
-            },
+            }
             Opcode::SMOD => {
                 let a = db.stack.pop().unwrap();
                 let b = db.stack.pop().unwrap();
@@ -447,13 +447,13 @@ fn exec_bytecode(
                 let smod = a % b;
                 db.stack.push(U256::try_from(smod).unwrap());
                 debug!("OPCODE: SMOD");
-            },
+            }
             Opcode::EXP => {
                 let a = db.stack.pop().unwrap();
                 let b = db.stack.pop().unwrap();
                 db.stack.push(a.wrapping_pow(b));
                 debug!("OPCODE: EXP");
-            },
+            }
             Opcode::LT => {
                 let a = db.stack.pop().unwrap();
                 let b = db.stack.pop().unwrap();
@@ -822,6 +822,7 @@ mod test {
     use super::*;
     use tracing_test::traced_test;
 
+    #[allow(clippy::derivable_impls)] // Prevent `cargo clippy --all-targets` warning
     impl Default for Context {
         fn default() -> Self {
             Self {
@@ -833,6 +834,7 @@ mod test {
         }
     }
 
+    #[allow(clippy::derivable_impls)] // Prevent `cargo clippy --all-targets` warning
     impl Default for Db {
         fn default() -> Self {
             Self {
@@ -1023,7 +1025,7 @@ mod test {
         call_data[2] = call_data_hash[2];
         call_data[3] = call_data_hash[3];
         debug!("call_data (len: {}): {:0x?}", call_data.len(), call_data);
-        debug!("call_data hex: -{}-", hex::encode(&call_data));
+        debug!("call_data hex: -{}-", hex::encode(call_data));
 
         let (db, _ctx) = exec(
             Path::new("resources/output/AddAndEvent.bin"),
@@ -1105,9 +1107,9 @@ mod test {
         let call_data = call_data_hash
             .into_iter()
             .take(4)
-            .chain(msg_start.into_iter())
-            .chain(msg_bytes_len.into_iter())
-            .chain(msg.into_iter())
+            .chain(msg_start)
+            .chain(msg_bytes_len)
+            .chain(msg)
             .collect::<Vec<u8>>();
 
         debug!("call_data (len: {}): {:0x?}", call_data.len(), call_data);
